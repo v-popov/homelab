@@ -1,0 +1,15 @@
+services:
+  ollama:
+    image: ollama/ollama:latest
+    container_name: ollama
+    restart: unless-stopped
+    # Host-only access for testing via curl (still not LAN):
+    ports:
+      - "127.0.0.1:11434:11434"
+
+    volumes:
+      - ollama_data:/root/.ollama
+
+volumes:
+  ollama_data:
+    name: ollama_data
