@@ -11,8 +11,8 @@ git reset --hard origin/main
 docker network inspect homelab >/dev/null 2>&1 || docker network create homelab
 
 # Postgres (shared DB)
-docker compose -f stacks/postgres/docker-compose.yml pull
-docker compose -f stacks/postgres/docker-compose.yml up -d --remove-orphans
+docker compose -f stacks/shared/postgres/docker-compose.yml pull
+docker compose -f stacks/shared/postgres/docker-compose.yml up -d --remove-orphans
 
 # AI Stack
 docker compose -f stacks/ai/docker-compose.yml pull
