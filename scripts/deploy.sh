@@ -17,3 +17,7 @@ docker compose -f stacks/shared/postgres/docker-compose.yml up -d --remove-orpha
 # AI Stack
 docker compose -f stacks/ai/docker-compose.yml pull
 docker compose -f stacks/ai/docker-compose.yml up -d --remove-orphans
+
+# HomeLab Bot
+docker compose -f stacks/homelab_bot/docker-compose.yml pull
+docker compose -f stacks/homelab_bot/docker-compose.yml up -d --remove-orphans
