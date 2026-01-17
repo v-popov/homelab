@@ -1,0 +1,7 @@
+services:
+  homelabbot:
+    build: .
+    container_name: HomeLabBot
+    restart: unless-stopped
+    env_file:
+      - .env
