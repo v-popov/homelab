@@ -4,4 +4,11 @@ services:
     container_name: homelab_bot
     restart: unless-stopped
     env_file:
+      - ../../config/ai.cfg
       - .env
+    networks:
+      - homelab
+
+networks:
+  homelab:
+    external: true
