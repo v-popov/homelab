@@ -5,11 +5,17 @@ services:
     restart: unless-stopped
     # Host-only access for testing via curl (still not LAN):
     ports:
-      - "127.0.0.1:11434:11434"
+      - "127.0.0.1:${OLLAMA_HOST_PORT}:11434"
 
     volumes:
       - ollama_data:/root/.ollama
+    networks:
+      - homelab
 
 volumes:
   ollama_data:
     name: ollama_data
+
+networks:
+  homelab:
+    external: true
