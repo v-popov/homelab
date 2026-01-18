@@ -10,6 +10,10 @@ git reset --hard origin/main
 # Ensure shared docker network exists (for cross-stack communication)
 docker network inspect homelab >/dev/null 2>&1 || docker network create homelab
 
+# Portainer
+docker compose -f stacks/portainer/docker-compose.yml pull
+docker compose -f stacks/portainer/docker-compose.yml up -d --remove-orphans
+
 # Postgres (shared DB)
 docker compose -f stacks/shared/postgres/docker-compose.yml pull
 docker compose -f stacks/shared/postgres/docker-compose.yml up -d --remove-orphans
