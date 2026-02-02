@@ -1,0 +1,14 @@
+services:
+  task_tracker_bot:
+    build: .
+    container_name: task_tracker_bot
+    restart: unless-stopped
+    env_file:
+      - ../shared/postgres/.env
+      - .env
+    networks:
+      - homelab
+
+networks:
+  homelab:
+    external: true

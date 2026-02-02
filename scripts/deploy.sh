@@ -25,3 +25,7 @@ docker compose --env-file config/ai.cfg -f stacks/ai/docker-compose.yml up -d --
 # HomeLab Bot
 docker compose -f stacks/homelab_bot/docker-compose.yml pull
 docker compose -f stacks/homelab_bot/docker-compose.yml up -d --remove-orphans
+
+# Task Tracker Bot
+docker compose -f stacks/task_tracker_bot/docker-compose.yml pull
+docker compose -f stacks/task_tracker_bot/docker-compose.yml up -d --remove-orphans
