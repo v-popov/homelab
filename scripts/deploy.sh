@@ -29,3 +29,7 @@ docker compose -f stacks/homelab_bot/docker-compose.yml up -d --remove-orphans
 # Task Tracker Bot
 docker compose -f stacks/task_tracker_bot/docker-compose.yml pull
 docker compose -f stacks/task_tracker_bot/docker-compose.yml up -d --remove-orphans
+
+# Price Tracker Bot
+docker compose -f stacks/price_tracker_bot/docker-compose.yml pull
+docker compose -f stacks/price_tracker_bot/docker-compose.yml up -d --remove-orphans
