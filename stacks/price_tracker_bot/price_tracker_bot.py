@@ -27,6 +27,8 @@ logger = logging.getLogger(__name__)
 
 PRICE_CHECK_INTERVAL = 60  # seconds
 
+_STOP_WORDS = {"the", "a", "an", "and", "or", "for", "of", "in", "with", "new", "system", "edition"}
+
 BROWSER_HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -165,6 +167,24 @@ async def db_update_price_state(
 # ---------------------------------------------------------------------------
 
 
+def _core_phrase(query: str) -> str:
+    """Strip trailing stop words to get the core product phrase."""
+    words = query.strip().split()
+    while words and words[-1].lower() in _STOP_WORDS:
+        words.pop()
+    return " ".join(words).lower()
+
+
+def _is_title_relevant(title: str, query: str) -> bool:
+    """Return True if the product title contains the core query phrase as a substring.
+
+    Phrase matching ("nintendo switch 2") is more precise than individual keyword
+    matching, preventing accessories from being mistaken for the actual product.
+    """
+    phrase = _core_phrase(query)
+    return phrase in title.lower() if phrase else True
+
+
 def _parse_price(text: str) -> Optional[Decimal]:
     clean = text.strip().lstrip("$").replace(",", "").split()[0]
     try:
@@ -200,6 +220,12 @@ async def scrape_amazon(client: httpx.AsyncClient, query: str) -> Optional[Decim
     for result in results:
         # Skip sponsored listings
         if result.select_one(".s-sponsored-label-info-icon"):
+            continue
+        # Check title relevance before trusting the price
+        title_tag = result.select_one("h2 span")
+        title = title_tag.get_text(strip=True) if title_tag else ""
+        if not _is_title_relevant(title, query):
+            logger.debug("Amazon: skipping %r (title mismatch for %r)", title[:60], query)
             continue
         price_tag = result.select_one(".a-price .a-offscreen")
         if not price_tag:
@@ -237,21 +263,31 @@ async def scrape_bestbuy(client: httpx.AsyncClient, query: str) -> Optional[Deci
             # Handle ItemList wrappers
             if item.get("@type") == "ItemList":
                 for element in item.get("itemListElement", []):
-                    item = element.get("item", element)
-                    offers = item.get("offers", {})
-                    _extract_offer_price(offers, prices)
+                    inner = element.get("item", element)
+                    name = inner.get("name", "")
+                    if not _is_title_relevant(name, query):
+                        continue
+                    _extract_offer_price(inner.get("offers", {}), prices)
             else:
-                offers = item.get("offers", {})
-                _extract_offer_price(offers, prices)
+                name = item.get("name", "")
+                if not _is_title_relevant(name, query):
+                    continue
+                _extract_offer_price(item.get("offers", {}), prices)
 
     if prices:
         return min(prices)
 
-    # Fallback: parse price spans from the product grid
-    for price_el in soup.select(".priceView-customer-price span[aria-hidden='true']"):
-        price = _parse_price(price_el.get_text())
-        if price is not None:
-            prices.append(price)
+    # Fallback: parse product cards from the grid (title + price together)
+    for card in soup.select(".sku-item"):
+        title_el = card.select_one(".sku-title")
+        title = title_el.get_text(strip=True) if title_el else ""
+        if not _is_title_relevant(title, query):
+            continue
+        price_el = card.select_one(".priceView-customer-price span[aria-hidden='true']")
+        if price_el:
+            price = _parse_price(price_el.get_text())
+            if price is not None:
+                prices.append(price)
 
     return min(prices) if prices else None
 
@@ -299,6 +335,10 @@ async def scrape_target(client: httpx.AsyncClient, query: str) -> Optional[Decim
     prices: list[Decimal] = []
     for item in products:
         try:
+            title = item.get("item", {}).get("product_description", {}).get("title", "")
+            if not _is_title_relevant(title, query):
+                logger.debug("Target: skipping %r (title mismatch for %r)", title[:60], query)
+                continue
             price_val = item["price"]["current_retail"]
             price = _parse_price(str(price_val))
             if price is not None:
