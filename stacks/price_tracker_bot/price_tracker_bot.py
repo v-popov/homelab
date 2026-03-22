@@ -3,6 +3,7 @@ import json
 import logging
 import os
 import re
+from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from typing import Optional
 
@@ -82,17 +83,32 @@ async def init_db(pool: asyncpg.Pool) -> None:
         await conn.execute(
             """
             CREATE TABLE IF NOT EXISTS tracked_items (
-                id                SERIAL PRIMARY KEY,
-                user_id           BIGINT NOT NULL,
-                chat_id           BIGINT NOT NULL,
-                item_name         TEXT NOT NULL,
-                baseline_price    NUMERIC(10,2) NOT NULL,
-                added_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-                is_below_baseline BOOLEAN,
-                last_checked_at   TIMESTAMPTZ,
-                last_notified_at  TIMESTAMPTZ
+                id                     SERIAL PRIMARY KEY,
+                user_id                BIGINT NOT NULL,
+                chat_id                BIGINT NOT NULL,
+                item_name              TEXT NOT NULL,
+                baseline_price         NUMERIC(10,2) NOT NULL,
+                added_at               TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                is_below_baseline      BOOLEAN,
+                last_checked_at        TIMESTAMPTZ,
+                last_notified_at       TIMESTAMPTZ,
+                last_error_notified_at TIMESTAMPTZ,
+                checks_today           INT NOT NULL DEFAULT 0,
+                checks_date            DATE
             );
             """
+        )
+        # Idempotent migrations for existing deployments
+        await conn.execute(
+            "ALTER TABLE tracked_items ADD COLUMN IF NOT EXISTS "
+            "last_error_notified_at TIMESTAMPTZ;"
+        )
+        await conn.execute(
+            "ALTER TABLE tracked_items ADD COLUMN IF NOT EXISTS "
+            "checks_today INT NOT NULL DEFAULT 0;"
+        )
+        await conn.execute(
+            "ALTER TABLE tracked_items ADD COLUMN IF NOT EXISTS checks_date DATE;"
         )
 
 
@@ -139,26 +155,41 @@ async def db_remove_item(conn: asyncpg.Connection, item_id: int, chat_id: int) -
 
 async def db_get_all_items(conn: asyncpg.Connection) -> list:
     return await conn.fetch(
-        "SELECT id, chat_id, item_name, baseline_price, is_below_baseline FROM tracked_items"
+        """
+        SELECT id, chat_id, item_name, baseline_price,
+               is_below_baseline, last_error_notified_at,
+               checks_today, checks_date
+        FROM tracked_items
+        """
     )
 
 
-async def db_update_price_state(
-    conn: asyncpg.Connection, item_id: int, is_below: bool
+async def db_update_check_result(
+    conn: asyncpg.Connection,
+    item_id: int,
+    is_below: bool,
+    notify_drop: bool,
+    notify_error: bool,
 ) -> None:
+    """Update price state, notification timestamps, and daily check counter."""
     await conn.execute(
         """
         UPDATE tracked_items
-        SET is_below_baseline = $2,
-            last_checked_at = NOW(),
-            last_notified_at = CASE
-                WHEN $2 = TRUE AND (is_below_baseline IS NOT TRUE) THEN NOW()
-                ELSE last_notified_at
-            END
+        SET is_below_baseline      = $2,
+            last_checked_at        = NOW(),
+            last_notified_at       = CASE WHEN $3 THEN NOW() ELSE last_notified_at END,
+            last_error_notified_at = CASE WHEN $4 THEN NOW() ELSE last_error_notified_at END,
+            checks_today           = CASE
+                                         WHEN checks_date = CURRENT_DATE THEN checks_today + 1
+                                         ELSE 1
+                                     END,
+            checks_date            = CURRENT_DATE
         WHERE id = $1
         """,
         item_id,
         is_below,
+        notify_drop,
+        notify_error,
     )
 
 
@@ -370,6 +401,7 @@ async def check_prices_job(context: ContextTypes.DEFAULT_TYPE) -> None:
             chat_id = item["chat_id"]
             item_id = item["id"]
             was_below = item["is_below_baseline"]
+            last_error_notified_at = item["last_error_notified_at"]
 
             amazon_price, bestbuy_price, target_price = await asyncio.gather(
                 scrape_amazon(client, item_name),
@@ -388,12 +420,19 @@ async def check_prices_job(context: ContextTypes.DEFAULT_TYPE) -> None:
                 if price is not None and price < baseline
             }
             is_below_now = bool(dropped_stores)
+            all_failed = all(p is None for p in store_results.values())
+
+            # Determine what notifications to send (based on old state, before DB update)
+            notify_drop = is_below_now and (was_below is not True)
+            notify_error = all_failed and (
+                last_error_notified_at is None
+                or (datetime.now(timezone.utc) - last_error_notified_at).total_seconds() >= 86400
+            )
 
             async with pool.acquire() as conn:
-                await db_update_price_state(conn, item_id, is_below_now)
+                await db_update_check_result(conn, item_id, is_below_now, notify_drop, notify_error)
 
-            # Notify only on a fresh drop (not already in below-baseline state)
-            if is_below_now and (was_below is not True):
+            if notify_drop:
                 lines = [f"Price drop alert: {item_name}", f"Your baseline: ${baseline:.2f}", ""]
                 for store, price in dropped_stores.items():
                     savings = baseline - price
@@ -401,7 +440,60 @@ async def check_prices_job(context: ContextTypes.DEFAULT_TYPE) -> None:
                 try:
                     await context.bot.send_message(chat_id=chat_id, text="\n".join(lines))
                 except Exception as exc:
-                    logger.warning("Failed to notify chat %d for item %d: %s", chat_id, item_id, exc)
+                    logger.warning("Failed to send drop alert for item %d: %s", item_id, exc)
+
+            if notify_error:
+                try:
+                    await context.bot.send_message(
+                        chat_id=chat_id,
+                        text=(
+                            f"Could not check prices for: {item_name}\n"
+                            "All three stores (Amazon, BestBuy, Target) returned no results.\n"
+                            "This may be due to scraping blocks. Will retry next minute."
+                        ),
+                    )
+                except Exception as exc:
+                    logger.warning("Failed to send error alert for item %d: %s", item_id, exc)
+
+
+async def daily_summary_job(context: ContextTypes.DEFAULT_TYPE) -> None:
+    pool: asyncpg.Pool = context.application.bot_data["db_pool"]
+
+    async with pool.acquire() as conn:
+        items = await db_get_all_items(conn)
+
+    if not items:
+        return
+
+    # Group by chat_id
+    by_chat: dict[int, list] = {}
+    for item in items:
+        by_chat.setdefault(item["chat_id"], []).append(item)
+
+    today = datetime.now(timezone.utc).date()
+
+    for chat_id, chat_items in by_chat.items():
+        lines = ["Daily price check summary\n"]
+        for item in chat_items:
+            if item["is_below_baseline"] is True:
+                status = "BELOW BASELINE"
+            elif item["is_below_baseline"] is False:
+                status = "above baseline"
+            else:
+                status = "not yet checked"
+
+            checks = item["checks_today"] if item["checks_date"] == today else 0
+
+            lines.append(
+                f"{item['item_name']}\n"
+                f"  baseline: ${item['baseline_price']:.2f} | status: {status} | "
+                f"checks today: {checks}"
+            )
+
+        try:
+            await context.bot.send_message(chat_id=chat_id, text="\n".join(lines))
+        except Exception as exc:
+            logger.warning("Failed to send daily summary to chat %d: %s", chat_id, exc)
 
 
 # ---------------------------------------------------------------------------
@@ -559,6 +651,12 @@ async def on_startup(app) -> None:
         interval=PRICE_CHECK_INTERVAL,
         first=10,
         name="price_checker",
+    )
+    app.job_queue.run_repeating(
+        daily_summary_job,
+        interval=86400,
+        first=86400,
+        name="daily_summary",
     )
 
 
