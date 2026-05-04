@@ -1,0 +1,14 @@
+services:
+  civics_bot:
+    build: .
+    container_name: civics_bot
+    restart: unless-stopped
+    env_file:
+      - ../shared/postgres/.env
+      - .env
+    networks:
+      - homelab
+
+networks:
+  homelab:
+    external: true
